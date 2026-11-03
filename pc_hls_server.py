@@ -1,42 +1,65 @@
 import os
+import json
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 import uvicorn
 
 app = FastAPI(title="Streaming UG - Cloud HLS Sniffer Relay")
 
-# Global cache to store active sniffed .m3u8 links sent by your PC
-active_streams = {}
+# Permanent file path inside the cloud workspace container
+CACHE_FILE = "/tmp/stream_cache.json"
+
+def get_cached_streams():
+    """Reads the active token keys securely from the shared system file storage."""
+    if not os.path.exists(CACHE_FILE):
+        return {}
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_cached_streams(data):
+    """Writes the fresh stream links instantly so all server workers see it simultaneously."""
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
 
 @app.get("/")
 def read_root():
+    streams = get_cached_streams()
     return {
         "status": "Cloud HLS Relay Server is running perfectly!", 
-        "active_keys": list(active_streams.keys()),
-        "cached_default": active_streams.get("default", "none")
+        "active_keys": list(streams.keys()),
+        "cached_default": streams.get("default", "none")
     }
 
-# 🎯 NEW ENDPOINT: This allows your local PC sniffer to push fresh tokens to the cloud
 @app.get("/update-cloud-token")
 def update_cloud_token(channel: str = Query(...), url: str = Query(...)):
     if not url or not channel:
         raise HTTPException(status_code=400, detail="Missing channel or url parameters")
     
-    # Save the fresh stream link into the cloud memory cache
-    active_streams[channel.lower().strip()] = url
-    active_streams["default"] = url
-    print(f"🔄 Token updated from PC for channel [{channel}]: {url}")
+    # Force atomic file-level updates across all thread workers
+    streams = get_cached_streams()
+    streams[channel.lower().strip()] = url
+    streams["default"] = url
+    save_cached_streams(streams)
+    
+    print(f"🔄 Global Shared Cache Synced for [{channel}]: {url}")
     return {"status": "success", "message": f"Channel {channel} updated successfully"}
 
 @app.get("/stream/{channel_slug}")
 def get_channel_stream(channel_slug: str):
     slug = channel_slug.lower().strip()
-    stream_url = active_streams.get(slug) or active_streams.get("default")
+    streams = get_cached_streams()
+    stream_url = streams.get(slug) or streams.get("default")
 
     if not stream_url or stream_url == "none":
         raise HTTPException(
             status_code=404, 
-            detail="Stream token not yet uploaded by home PC script. Please ensure home sniffer is running."
+            detail="Stream token not yet uploaded by home PC script."
         )
 
     print(f"🚀 User connected from Android! Redirecting cleanly to: {stream_url}")
